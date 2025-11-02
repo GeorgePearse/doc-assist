@@ -68,6 +68,82 @@ Using **Qdrant** for vector storage:
 1. User searches for unindexed package
 2. Queue for scraping or immediate index if small
 
+## Implementation Notes
+
+### Data Schema (Qdrant)
+
+```json
+{
+  "package": "numpy",
+  "version": "1.24.0",
+  "module": "numpy.array",
+  "object_type": "function",
+  "signature": "array(object, dtype=None, ...)",
+  "docstring": "...",
+  "content_hash": "sha256...",
+  "source": "pypi|readthedocs|generated",
+  "vector": [...]
+}
+```
+
+### Multi-Language Support Roadmap
+
+Start with **Python** (80% of use case), then expand:
+
+- **Python**: AST parsing with `ast` module (subprocess or `rustpython-parser`)
+- **JavaScript/TypeScript**: `swc_ecma_parser` (Rust native) or TypeScript compiler API
+- **Rust**: `syn` crate for AST parsing
+- **Go**: Call `go doc` command, parse output
+- **Java**: JavaParser library
+
+### Cost & Performance Estimates
+
+**Storage (Qdrant)**:
+- ~1KB per function/class doc (compressed)
+- Top 1000 packages × 100 functions avg × 5 versions = 500K entries
+- ~500MB vector data
+- Qdrant Cloud free tier: 1GB (sufficient for MVP)
+
+**Embedding**:
+- Use sentence-transformers (local, open-source)
+- Models: `all-MiniLM-L6-v2` (384 dims, fast) or `all-mpnet-base-v2` (768 dims, better quality)
+- Embed ~500K docs: ~2-4 hours CPU, ~30 min GPU
+
+**LLM Generation (Tier 3)**:
+- Assume 10% of queries need generation initially
+- Cache hit rate improves over time (90%+ after month)
+- Cost: minimal with caching strategy
+
+### MVP Roadmap
+
+**Week 1**: Core indexing
+- Scrape top 50 Python packages
+- Parse docstrings only (no narrative docs)
+- Embed with sentence-transformers
+- Store in local Qdrant (Docker)
+
+**Week 2**: API layer
+- Build REST API with Axum
+- Semantic search endpoint
+- Version filtering
+
+**Week 3**: Intelligence layer
+- Add Tier 3 (LLM generation) for sparse docs
+- Implement caching
+
+**Week 4**: Deployment
+- Deploy to Fly.io
+- Migrate to Qdrant Cloud
+- Set up continuous scraping pipeline
+
+### Alternative Approaches Considered
+
+1. **PostgreSQL + pgvector**: More versatile for mixed data, but chose Qdrant for Rust-native performance
+2. **Upstash Vector**: Serverless and fitting (inspired by Context7), but Qdrant offers better self-hosting
+3. **Diff-based storage**: More complex than content-addressed hashing for version management
+4. **GitHub mining**: Too storage-intensive compared to PyPI API approach
+5. **Push-based webhooks**: More complex than pull-based polling for incremental updates
+
 ## Deployment Options
 
 ### Easiest Options:
