@@ -6,6 +6,14 @@ A documentation assistant tool.
 
 This project was inspired by [upstash/context7#824](https://github.com/upstash/context7/issues/824).
 
+## Data Storage
+
+Using **Qdrant** for vector storage:
+- Rust-native vector database
+- Great Rust client support
+- Can run locally with Docker or use Qdrant Cloud
+- Excellent for semantic search over documentation
+
 ## Deployment Options
 
 ### Easiest Options:
