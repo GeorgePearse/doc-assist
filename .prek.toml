@@ -1,0 +1,35 @@
+# Prek pre-commit configuration
+# Fast and efficient pre-commit hooks for Rust projects
+
+[[hook]]
+name = "Format check"
+command = "cargo fmt -- --check"
+stage = "pre-commit"
+pass_filenames = false
+
+[[hook]]
+name = "Clippy pedantic mode"
+command = "cargo clippy --all-targets --all-features -- -D warnings -W clippy::pedantic -W clippy::nursery -W clippy::cargo"
+stage = "pre-commit"
+pass_filenames = false
+fail_fast = false
+
+[[hook]]
+name = "Test compilation"
+command = "cargo check --lib"
+stage = "pre-commit"
+pass_filenames = false
+
+[[hook]]
+name = "Security audit"
+command = "cargo audit"
+stage = "pre-commit"
+pass_filenames = false
+allow_failure = true  # Don't block commits on audit failures, but warn
+
+[[hook]]
+name = "Documentation check"
+command = "cargo doc --no-deps --all-features"
+stage = "pre-commit"
+pass_filenames = false
+allow_failure = true
