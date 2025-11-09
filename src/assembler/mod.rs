@@ -446,3 +446,43 @@ impl DocumentAssembler {
         "Unknown".to_string()
     }
 }
+
+/// Assemble documentation from generation results
+pub async fn assemble_documentation(
+    generation_result: GenerationResult,
+    analysis: &crate::analyzer::CodebaseAnalysis,
+    config: &crate::config::Config,
+) -> Result<DocumentationOutput> {
+    let assembler = DocumentAssembler::new(
+        config.output_dir.clone(),
+        analysis.name.clone(),
+    );
+
+    assembler.assemble_documentation(&generation_result).await?;
+
+    Ok(DocumentationOutput {
+        file_count: count_files(&config.output_dir).await?,
+        output_dir: config.output_dir.clone(),
+    })
+}
+
+#[derive(Debug)]
+pub struct DocumentationOutput {
+    pub file_count: usize,
+    pub output_dir: std::path::PathBuf,
+}
+
+async fn count_files(dir: &std::path::Path) -> Result<usize> {
+    let mut count = 0;
+    let mut entries = fs::read_dir(dir).await
+        .map_err(|e| DocAssistError::IoError(format!("Failed to read output directory: {}", e)))?;
+
+    while let Some(entry) = entries.next_entry().await
+        .map_err(|e| DocAssistError::IoError(format!("Failed to read directory entry: {}", e)))? {
+        if entry.path().extension().and_then(|s| s.to_str()) == Some("md") {
+            count += 1;
+        }
+    }
+
+    Ok(count)
+}

@@ -1,10 +1,18 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum DepthLevel {
+    Quick,
+    Standard,
+    Comprehensive,
+    Continuous,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub path: PathBuf,
-    pub depth: crate::DepthLevel,
+    pub depth: DepthLevel,
     pub query_count: usize,
     pub output_dir: PathBuf,
     pub model: String,
@@ -68,41 +76,5 @@ impl Config {
         }
 
         false
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DepthLevel {
-    pub name: String,
-    pub query_count: usize,
-}
-
-impl DepthLevel {
-    pub fn quick() -> Self {
-        Self {
-            name: "quick".to_string(),
-            query_count: 20,
-        }
-    }
-
-    pub fn standard() -> Self {
-        Self {
-            name: "standard".to_string(),
-            query_count: 60,
-        }
-    }
-
-    pub fn comprehensive() -> Self {
-        Self {
-            name: "comprehensive".to_string(),
-            query_count: 100,
-        }
-    }
-
-    pub fn continuous() -> Self {
-        Self {
-            name: "continuous".to_string(),
-            query_count: 1000,
-        }
     }
 }

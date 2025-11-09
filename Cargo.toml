@@ -18,7 +18,7 @@ colored = "2.1"     # Colored terminal output
 tokio = { version = "1.40", features = ["full"] }
 
 # LLM integration
-litellm-rs = "0.1"  # LLM integration library
+llm-connector = { version = "0.5", features = ["reqwest", "streaming"] }  # Multi-provider LLM client
 
 # AST parsing
 syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }

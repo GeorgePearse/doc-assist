@@ -1,166 +1,191 @@
 # doc-assist
 
-A documentation assistant tool.
+A high-performance Rust CLI tool for automatically generating comprehensive documentation for codebases using Large Language Models (LLMs).
 
-## Inspiration
+## Features
 
-This project was inspired by [upstash/context7#824](https://github.com/upstash/context7/issues/824).
+- **Multi-language support**: Analyzes Rust, Python, JavaScript, TypeScript, Go, Java, C++, and more
+- **Intelligent analysis**: Parses AST to understand code structure, APIs, and dependencies
+- **Flexible depth levels**: From quick overviews to exhaustive documentation
+- **Resume capability**: Continue from where you left off if interrupted
+- **Rate limiting**: Respects API rate limits automatically
+- **Cost estimation**: Shows estimated costs before generation
+- **Multiple LLM providers**: Supports OpenAI and Anthropic models
 
-## Tech Stack
+## Installation
 
-- **Web Framework**: Axum (built on Tokio)
-  - Type-safe, fast async framework
-  - Excellent ergonomics and tower middleware ecosystem
-  - Native async/await support
+### From source
 
-## Data Storage
+```bash
+# Clone the repository
+git clone https://github.com/georgepearse/doc-assist.git
+cd doc-assist
 
-Using **Qdrant** for vector storage:
-- Rust-native vector database
-- Great Rust client support
-- Can run locally with Docker or use Qdrant Cloud
-- Excellent for semantic search over documentation
+# Build with cargo
+cargo build --release
 
-## Documentation Scraping Architecture
-
-### 3-Tier Hybrid Approach
-
-#### Tier 1: Static Pre-Indexed (Core)
-- **Source**: PyPI packages via JSON API (`https://pypi.org/pypi/{package}/json`)
-- **Method**: Download source distributions (`.tar.gz`), parse with AST
-- **Extract**: Docstrings, type hints, function signatures, class hierarchies
-- **Embed**: sentence-transformers (local, open-source models)
-- **Storage**: Qdrant with content-addressed deduplication (SHA256 hashing)
-
-#### Tier 2: Scraped Documentation (Enrichment)
-- **Source**: ReadTheDocs, official documentation sites
-- **Content**: Narrative docs, tutorials, examples
-- **Method**: Headless scraping for popular packages
-- **Frequency**: Weekly scrapes
-
-#### Tier 3: On-Demand Generation (Fallback)
-- **When**: Sparse/missing docstrings detected
-- **Method**: LLM generates explanations at query time (DeepWiki-style)
-- **Process**: Parse code → extract context → LLM explains → cache result
-- **Caching**: Store generated content back to Qdrant with TTL
-
-### Version Management
-
-**Content-Addressed Storage**:
-- Hash each docstring with SHA256
-- Store unique content once, versions reference hashes
-- Automatic deduplication (80-90% space savings)
-- Efficient cross-version queries
-
-### Pipeline
-
-**Bootstrap** (one-time):
-1. Fetch top 50-1000 PyPI packages by downloads
-2. Download latest + all major versions (1.x, 2.x, etc.)
-3. Parse, embed, and store
-
-**Incremental Updates** (continuous):
-1. Poll PyPI RSS feed every 6 hours
-2. Download and index new versions only
-3. Auto-deduplicate via content hash
-
-**On-Demand** (user-triggered):
-1. User searches for unindexed package
-2. Queue for scraping or immediate index if small
-
-## Implementation Notes
-
-### Data Schema (Qdrant)
-
-```json
-{
-  "package": "numpy",
-  "version": "1.24.0",
-  "module": "numpy.array",
-  "object_type": "function",
-  "signature": "array(object, dtype=None, ...)",
-  "docstring": "...",
-  "content_hash": "sha256...",
-  "source": "pypi|readthedocs|generated",
-  "vector": [...]
-}
+# Install to PATH
+cargo install --path .
 ```
 
-### Multi-Language Support Roadmap
+## Usage
 
-Start with **Python** (80% of use case), then expand:
+### Basic Usage
 
-- **Python**: AST parsing with `ast` module (subprocess or `rustpython-parser`)
-- **JavaScript/TypeScript**: `swc_ecma_parser` (Rust native) or TypeScript compiler API
-- **Rust**: `syn` crate for AST parsing
-- **Go**: Call `go doc` command, parse output
-- **Java**: JavaParser library
+```bash
+# Set your API key (OpenAI or Anthropic)
+export OPENAI_API_KEY=your-api-key
+# or
+export ANTHROPIC_API_KEY=your-api-key
 
-### Cost & Performance Estimates
+# Generate documentation for current directory
+docassist
 
-**Storage (Qdrant)**:
-- ~1KB per function/class doc (compressed)
-- Top 1000 packages × 100 functions avg × 5 versions = 500K entries
-- ~500MB vector data
-- Qdrant Cloud free tier: 1GB (sufficient for MVP)
+# Generate documentation for a specific path
+docassist /path/to/project
 
-**Embedding**:
-- Use sentence-transformers (local, open-source)
-- Models: `all-MiniLM-L6-v2` (384 dims, fast) or `all-mpnet-base-v2` (768 dims, better quality)
-- Embed ~500K docs: ~2-4 hours CPU, ~30 min GPU
+# Use a specific model
+docassist --model claude-3-5-sonnet-20241022
+docassist --model gpt-4
+```
 
-**LLM Generation (Tier 3)**:
-- Assume 10% of queries need generation initially
-- Cache hit rate improves over time (90%+ after month)
-- Cost: minimal with caching strategy
+### Documentation Depth Levels
 
-### MVP Roadmap
+```bash
+# Quick overview (20 queries)
+docassist --depth quick
 
-**Week 1**: Core indexing
-- Scrape top 50 Python packages
-- Parse docstrings only (no narrative docs)
-- Embed with sentence-transformers
-- Store in local Qdrant (Docker)
+# Standard documentation (60 queries) - default
+docassist --depth standard
 
-**Week 2**: API layer
-- Build REST API with Axum
-- Semantic search endpoint
-- Version filtering
+# Comprehensive documentation (100+ queries)
+docassist --depth comprehensive
 
-**Week 3**: Intelligence layer
-- Add Tier 3 (LLM generation) for sparse docs
-- Implement caching
+# Continuous mode (keeps going until stopped)
+docassist --depth continuous
 
-**Week 4**: Deployment
-- Deploy to Fly.io
-- Migrate to Qdrant Cloud
-- Set up continuous scraping pipeline
+# Custom query count
+docassist --queries 50
+```
 
-### Alternative Approaches Considered
+### Advanced Options
 
-1. **PostgreSQL + pgvector**: More versatile for mixed data, but chose Qdrant for Rust-native performance
-2. **Upstash Vector**: Serverless and fitting (inspired by Context7), but Qdrant offers better self-hosting
-3. **Diff-based storage**: More complex than content-addressed hashing for version management
-4. **GitHub mining**: Too storage-intensive compared to PyPI API approach
-5. **Push-based webhooks**: More complex than pull-based polling for incremental updates
+```bash
+# Dry run - see query plan without executing
+docassist --dry-run
 
-## Deployment Options
+# Resume from previous run
+docassist --resume
 
-### Easiest Options:
+# Force regeneration (ignore cache)
+docassist --force
 
-1. **Shuttle.rs** - Purpose-built for Rust web services
-   - Zero config deployment
-   - Built-in support for Tokio/Axum/Actix
-   - Free tier available
-   - Literally `cargo shuttle deploy`
+# Custom output directory
+docassist --output ./my-docs
 
-2. **Fly.io** - Very popular for Rust apps
-   - Good free tier (256MB RAM, 3 VMs)
-   - Simple `flyctl deploy`
-   - Great for long-running services
-   - Excellent docs for Rust
+# Rate limiting
+docassist --rate-limit 30
 
-3. **Railway** - Simple and developer-friendly
-   - Auto-detects Rust projects
-   - Good free tier ($5 credit/month)
-   - Nice dashboard
+# Include/exclude patterns
+docassist --include "src/**/*.rs" --exclude "tests/**"
+
+# Verbose output
+docassist --verbose
+```
+
+## Output Structure
+
+The tool generates a comprehensive documentation structure:
+
+```
+docs/
+├── README.md                 # Main documentation overview
+├── ARCHITECTURE.md          # System architecture
+├── SUMMARY.md              # Table of contents
+├── api/
+│   └── README.md           # API reference
+├── modules/
+│   ├── README.md           # Module index
+│   └── [module].md         # Individual module docs
+├── guides/
+│   ├── getting-started.md
+│   ├── installation.md
+│   └── ...
+├── examples/
+│   └── ...                 # Code examples
+└── .metadata.json          # Generation metadata
+```
+
+## How It Works
+
+1. **Analysis Phase**: Scans the codebase, identifies languages, modules, and APIs
+2. **Planning Phase**: Creates an optimized query plan based on the codebase structure
+3. **Generation Phase**: Executes LLM queries with intelligent context management
+4. **Assembly Phase**: Organizes responses into structured documentation
+
+## Configuration
+
+### Environment Variables
+
+- `OPENAI_API_KEY`: OpenAI API key
+- `ANTHROPIC_API_KEY`: Anthropic API key
+- `DOCASSIST_MODEL`: Default model to use
+
+### Supported Models
+
+**OpenAI:**
+- `gpt-4`
+- `gpt-4-turbo`
+- `gpt-3.5-turbo`
+
+**Anthropic:**
+- `claude-3-5-sonnet-20241022`
+- `claude-3-opus-20240229`
+- `claude-3-sonnet-20240229`
+
+## Development
+
+### Building from source
+
+```bash
+cargo build
+```
+
+### Running tests
+
+```bash
+cargo test
+```
+
+### Running with verbose logging
+
+```bash
+RUST_LOG=debug cargo run -- --verbose
+```
+
+## Architecture
+
+doc-assist is built with a modular architecture:
+
+- **Analyzer**: Parses source code and extracts structure
+- **Planner**: Creates optimized query plans
+- **Generator**: Manages LLM interactions with rate limiting
+- **Assembler**: Organizes responses into documentation
+- **State Manager**: Handles persistence and resume capability
+- **Context Manager**: Optimizes context window usage
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+
+MIT License - see LICENSE file for details
+
+## Acknowledgments
+
+Built with:
+- [llm-connector](https://crates.io/crates/llm-connector) - Multi-provider LLM client
+- [tree-sitter](https://tree-sitter.github.io/tree-sitter/) - Code parsing
+- [tokio](https://tokio.rs/) - Async runtime
+- [clap](https://clap.rs/) - CLI framework

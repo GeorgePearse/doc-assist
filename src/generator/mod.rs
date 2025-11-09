@@ -2,7 +2,10 @@ use crate::context::ContextManager;
 use crate::error::{DocAssistError, Result};
 use crate::planner::{Query, QueryPlan, Phase};
 use crate::state::GenerationState;
-use litellm_rs::{completion, system_message, user_message, CompletionOptions};
+use llm_connector::{
+    LlmClient,
+    types::{ChatRequest, Message, Role},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,6 +36,7 @@ pub struct GenerationResult {
 
 pub struct Generator {
     model: String,
+    client: Arc<LlmClient>,
     max_concurrent_requests: usize,
     rate_limit_per_minute: usize,
     retry_attempts: usize,
@@ -47,20 +51,27 @@ impl Generator {
         max_concurrent_requests: usize,
         rate_limit_per_minute: usize,
     ) -> Result<Self> {
-        // Set the API key as an environment variable based on the model
-        if model.contains("claude") {
-            std::env::set_var("ANTHROPIC_API_KEY", api_key);
+        // Create the appropriate client based on the model
+        let client = if model.contains("claude") {
+            std::env::set_var("ANTHROPIC_API_KEY", api_key.clone());
+            LlmClient::anthropic(&api_key)
+                .map_err(|e| DocAssistError::ConfigError(format!("Failed to create Anthropic client: {}", e)))?
         } else if model.contains("gpt") {
-            std::env::set_var("OPENAI_API_KEY", api_key);
-        } else if model.contains("gemini") {
-            std::env::set_var("GOOGLE_API_KEY", api_key);
-        }
+            std::env::set_var("OPENAI_API_KEY", api_key.clone());
+            LlmClient::openai(&api_key)
+                .map_err(|e| DocAssistError::ConfigError(format!("Failed to create OpenAI client: {}", e)))?
+        } else {
+            return Err(DocAssistError::ConfigError(
+                format!("Unsupported model: {}. Use 'claude' or 'gpt' models", model)
+            ));
+        };
 
         let context_manager = Arc::new(Mutex::new(ContextManager::new(128_000))); // 128k token context
         let state_manager = Arc::new(Mutex::new(GenerationState::new()));
 
         Ok(Self {
             model,
+            client: Arc::new(client),
             max_concurrent_requests,
             rate_limit_per_minute,
             retry_attempts: 3,
@@ -165,6 +176,7 @@ impl Generator {
             let semaphore = semaphore.clone();
             let rate_limiter = rate_limiter.clone();
             let model = self.model.clone();
+            let client = self.client.clone();
             let context_manager = self.context_manager.clone();
             let state_manager = self.state_manager.clone();
             let query = query.clone();
@@ -185,7 +197,7 @@ impl Generator {
                 let mut last_error = None;
 
                 while attempts < retry_attempts {
-                    match execute_single_query(&model, &query, &context).await {
+                    match execute_single_query(&model, &query, &context, &*client).await {
                         Ok(result) => {
                             // Update state and context
                             state_manager.lock().await.mark_query_completed(query.id);
@@ -266,6 +278,7 @@ async fn execute_single_query(
     model: &str,
     query: &Query,
     context: &str,
+    client: &LlmClient,
 ) -> Result<QueryResult> {
     let start_time = std::time::Instant::now();
 
@@ -276,36 +289,47 @@ async fn execute_single_query(
         "Please provide a comprehensive and detailed response suitable for technical documentation."
     );
 
+    // Create chat messages
     let messages = vec![
-        system_message("You are a technical documentation expert. Provide clear, accurate, and comprehensive documentation based on the codebase analysis. Use markdown formatting for better readability."),
-        user_message(&full_prompt),
+        Message::text(
+            Role::System,
+            "You are a technical documentation expert. Provide clear, accurate, and comprehensive documentation based on the codebase analysis. Use markdown formatting for better readability."
+        ),
+        Message::text(Role::User, &full_prompt),
     ];
 
-    let options = Some(CompletionOptions {
+    // Build the request
+    let request = ChatRequest {
+        model: model.to_string(),
+        messages,
         max_tokens: Some(4000),
         temperature: Some(0.3), // Lower temperature for more consistent documentation
         ..Default::default()
-    });
+    };
 
-    let response = completion(model, messages, options).await
-        .map_err(|e| DocAssistError::GenerationError(format!("LLM request failed: {}", e)))?;
+    // Send request to client
+    let response = client.chat(&request).await
+        .map_err(|e| DocAssistError::GenerationError(format!("LLM request failed: {:?}", e)))?;
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
-    let response_text = response.choices.get(0)
-        .ok_or_else(|| DocAssistError::GenerationError("No response from LLM".to_string()))?
-        .message.content.clone()
-        .map(|c| c.to_string())
-        .unwrap_or_else(|| String::new());
 
-    let tokens_used = response.usage
-        .map(|u| u.total_tokens)
-        .unwrap_or((full_prompt.len() / 4) as u32); // Rough estimate if not provided
+    // Extract response text using get_content()
+    let response_text = response.get_content()
+        .unwrap_or("")
+        .to_string();
+
+    // Calculate tokens (rough estimate based on response length)
+    let tokens_used = if let Some(usage) = response.usage {
+        usage.total_tokens as usize
+    } else {
+        (full_prompt.len() + response_text.len()) / 4
+    };
 
     Ok(QueryResult {
         query_id: query.id,
         prompt: query.prompt.clone(),
         response: response_text,
-        tokens_used: tokens_used as usize,
+        tokens_used,
         duration_ms,
         error: None,
     })
@@ -342,5 +366,30 @@ impl RateLimiter {
         }
 
         self.request_times.push(now);
+    }
+}
+
+/// Execute queries from a plan
+pub async fn execute_queries(
+    plan: &QueryPlan,
+    config: &crate::config::Config,
+    existing_state: Option<&GenerationState>,
+) -> Result<GenerationResult> {
+    let api_key = std::env::var("ANTHROPIC_API_KEY")
+        .or_else(|_| std::env::var("OPENAI_API_KEY"))
+        .map_err(|_| DocAssistError::ConfigError("No API key found".to_string()))?;
+
+    let generator = Generator::new(
+        api_key,
+        config.model.clone(),
+        config.rate_limit as usize / 6, // Max concurrent requests (rate_limit per minute / 6 = per 10 seconds)
+        config.rate_limit as usize,
+    )?;
+
+    if let Some(state) = existing_state {
+        let mut mutable_plan = plan.clone();
+        generator.resume_from_state(state.clone(), &mut mutable_plan).await
+    } else {
+        generator.execute_plan(plan).await
     }
 }

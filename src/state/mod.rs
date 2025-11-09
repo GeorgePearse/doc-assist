@@ -19,6 +19,7 @@ pub struct GenerationState {
     pub total_cost_usd: f64,
     pub errors: Vec<String>,
     pub checkpoint_version: u32,
+    pub total_queries: usize,  // Add this field for main.rs
 }
 
 impl GenerationState {
@@ -34,6 +35,7 @@ impl GenerationState {
             total_cost_usd: 0.0,
             errors: Vec::new(),
             checkpoint_version: 1,
+            total_queries: 0,
         }
     }
 
@@ -233,6 +235,21 @@ impl GenerationState {
 
         Some(chrono::Duration::seconds(estimated_remaining_seconds))
     }
+}
+
+/// Load state from disk
+pub async fn load_state(path: &Path) -> Result<Option<GenerationState>> {
+    GenerationState::load_from_disk(path).await
+}
+
+/// Clear state file
+pub async fn clear_state(path: &Path) -> Result<()> {
+    let state_file = path.join(".docassist").join("state.json");
+    if state_file.exists() {
+        fs::remove_file(&state_file).await
+            .map_err(|e| DocAssistError::IoError(format!("Failed to clear state: {}", e)))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

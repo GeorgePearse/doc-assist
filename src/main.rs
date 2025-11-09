@@ -1,9 +1,9 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, ValueEnum};
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
-use tracing::{error, info};
+use tracing::error;
 use tracing_subscriber;
 
 mod analyzer;
@@ -28,7 +28,7 @@ struct Cli {
 
     /// Documentation depth level
     #[arg(short, long, value_enum, default_value = "standard")]
-    depth: DepthLevel,
+    depth: CliDepthLevel,
 
     /// Custom query count (overrides depth level)
     #[arg(short = 'q', long)]
@@ -76,50 +76,44 @@ struct Cli {
     exclude: Vec<String>,
 }
 
-// DepthLevel is imported from the crate root
-use doc_assist::DepthLevel;
-
-// Implement ValueEnum for clap
-impl clap::ValueEnum for DepthLevel {
-    fn value_variants<'a>() -> &'a [Self] {
-        &[
-            DepthLevel::Quick,
-            DepthLevel::Standard,
-            DepthLevel::Comprehensive,
-            DepthLevel::Continuous,
-        ]
-    }
-
-    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        Some(match self {
-            DepthLevel::Quick => clap::builder::PossibleValue::new("quick")
-                .help("Quick pass - 20 queries for basic documentation"),
-            DepthLevel::Standard => clap::builder::PossibleValue::new("standard")
-                .help("Standard depth - 60 queries for comprehensive docs"),
-            DepthLevel::Comprehensive => clap::builder::PossibleValue::new("comprehensive")
-                .help("Comprehensive - 100+ queries for exhaustive documentation"),
-            DepthLevel::Continuous => clap::builder::PossibleValue::new("continuous")
-                .help("Continuous - Keep adding detail until manually stopped"),
-        })
-    }
+// DepthLevel wrapper for CLI
+#[derive(Clone, Debug, ValueEnum)]
+enum CliDepthLevel {
+    /// Quick pass - 20 queries for basic documentation
+    Quick,
+    /// Standard depth - 60 queries for comprehensive docs
+    Standard,
+    /// Comprehensive - 100+ queries for exhaustive documentation
+    Comprehensive,
+    /// Continuous - Keep adding detail until manually stopped
+    Continuous,
 }
 
-impl DepthLevel {
+impl CliDepthLevel {
+    fn to_depth_level(&self) -> crate::config::DepthLevel {
+        match self {
+            CliDepthLevel::Quick => crate::config::DepthLevel::Quick,
+            CliDepthLevel::Standard => crate::config::DepthLevel::Standard,
+            CliDepthLevel::Comprehensive => crate::config::DepthLevel::Comprehensive,
+            CliDepthLevel::Continuous => crate::config::DepthLevel::Continuous,
+        }
+    }
+
     fn to_query_count(&self) -> usize {
         match self {
-            DepthLevel::Quick => 20,
-            DepthLevel::Standard => 60,
-            DepthLevel::Comprehensive => 100,
-            DepthLevel::Continuous => 1000, // Will be limited by user interruption
+            CliDepthLevel::Quick => 20,
+            CliDepthLevel::Standard => 60,
+            CliDepthLevel::Comprehensive => 100,
+            CliDepthLevel::Continuous => 1000, // Will be limited by user interruption
         }
     }
 
     fn description(&self) -> &str {
         match self {
-            DepthLevel::Quick => "Quick overview with basic API docs",
-            DepthLevel::Standard => "Comprehensive documentation with examples",
-            DepthLevel::Comprehensive => "Exhaustive documentation with deep dives",
-            DepthLevel::Continuous => "Continuous generation until stopped",
+            CliDepthLevel::Quick => "Quick overview with basic API docs",
+            CliDepthLevel::Standard => "Comprehensive documentation with examples",
+            CliDepthLevel::Comprehensive => "Exhaustive documentation with deep dives",
+            CliDepthLevel::Continuous => "Continuous generation until stopped",
         }
     }
 }
@@ -162,7 +156,7 @@ async fn main() -> Result<()> {
 
     let config = Config {
         path: cli.path.clone(),
-        depth: cli.depth.clone(),
+        depth: cli.depth.to_depth_level(),
         query_count,
         output_dir: cli.output.clone(),
         model: cli.model.clone(),
@@ -222,7 +216,7 @@ async fn run_documentation_generation(config: Config, dry_run: bool) -> Result<(
 
     // Print analysis summary
     println!("\n{}", "Analysis Summary:".bold());
-    println!("  {} {}", "Primary language:".cyan(), analysis.primary_language);
+    println!("  {} {}", "Primary language:".cyan(), analysis.primary_language.name());
     println!("  {} {} files", "Total files:".cyan(), analysis.file_count);
     println!("  {} {} modules", "Modules found:".cyan(), analysis.module_count);
     println!("  {} {} public APIs", "Public APIs:".cyan(), analysis.public_api_count);
@@ -302,10 +296,6 @@ async fn run_documentation_generation(config: Config, dry_run: bool) -> Result<(
         documentation.file_count
     ));
 
-    // Write to disk
-    println!("{} Writing documentation to disk...", "►".cyan().bold());
-    documentation.write_to_disk(&config.output_dir).await?;
-
     // Clean up state if successful
     if config.resume {
         state::clear_state(&config.path).await?;
@@ -314,9 +304,8 @@ async fn run_documentation_generation(config: Config, dry_run: bool) -> Result<(
     // Print statistics
     println!("\n{}", "Generation Statistics:".bold());
     println!("  {} {}", "Total queries:".cyan(), plan.total_queries);
-    println!("  {} ${:.2}", "Estimated cost:".cyan(), documentation.estimated_cost);
+    println!("  {} ${:.2}", "Estimated cost:".cyan(), plan.estimated_cost.total_cost_usd);
     println!("  {} {}", "Files generated:".cyan(), documentation.file_count);
-    println!("  {} {} words", "Total content:".cyan(), documentation.word_count);
 
     Ok(())
 }

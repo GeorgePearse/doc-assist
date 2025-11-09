@@ -69,6 +69,29 @@ pub enum PrimaryLanguage {
     Mixed(Vec<Language>),
 }
 
+impl PrimaryLanguage {
+    pub fn name(&self) -> String {
+        match self {
+            PrimaryLanguage::Rust => "Rust".to_string(),
+            PrimaryLanguage::Python => "Python".to_string(),
+            PrimaryLanguage::JavaScript => "JavaScript".to_string(),
+            PrimaryLanguage::TypeScript => "TypeScript".to_string(),
+            PrimaryLanguage::Go => "Go".to_string(),
+            PrimaryLanguage::Java => "Java".to_string(),
+            PrimaryLanguage::Cpp => "C++".to_string(),
+            PrimaryLanguage::C => "C".to_string(),
+            PrimaryLanguage::CSharp => "C#".to_string(),
+            PrimaryLanguage::Ruby => "Ruby".to_string(),
+            PrimaryLanguage::Swift => "Swift".to_string(),
+            PrimaryLanguage::Kotlin => "Kotlin".to_string(),
+            PrimaryLanguage::Mixed(langs) => {
+                let names: Vec<String> = langs.iter().map(|l| l.name().to_string()).collect();
+                format!("Mixed ({})", names.join(", "))
+            }
+        }
+    }
+}
+
 impl From<Language> for PrimaryLanguage {
     fn from(lang: Language) -> Self {
         match lang {
