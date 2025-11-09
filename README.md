@@ -14,18 +14,45 @@ A high-performance Rust CLI tool for automatically generating comprehensive docu
 
 ## Installation
 
-### From source
+### Quick Install (Using Cargo)
+
+```bash
+# Install directly from GitHub
+cargo install --git https://github.com/GeorgePearse/doc-assist
+
+# The binary will be installed as 'docassist' in your cargo bin directory
+# Usually ~/.cargo/bin/docassist
+```
+
+### Install from Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/georgepearse/doc-assist.git
+git clone https://github.com/GeorgePearse/doc-assist.git
 cd doc-assist
 
-# Build with cargo
-cargo build --release
-
-# Install to PATH
+# Install using cargo (recommended)
 cargo install --path .
+
+# Or build and install manually
+cargo build --release
+sudo cp target/release/docassist /usr/local/bin/
+
+# Or add to PATH without sudo
+mkdir -p ~/.local/bin
+cp target/release/docassist ~/.local/bin/
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Verify Installation
+
+```bash
+# Check if docassist is available
+docassist --version
+
+# Get help
+docassist --help
 ```
 
 ## Usage
@@ -185,7 +212,7 @@ MIT License - see LICENSE file for details
 ## Acknowledgments
 
 Built with:
-- [llm-connector](https://crates.io/crates/llm-connector) - Multi-provider LLM client
+- [litellm-rs](https://crates.io/crates/litellm-rs) - Multi-provider LLM client
 - [tree-sitter](https://tree-sitter.github.io/tree-sitter/) - Code parsing
 - [tokio](https://tokio.rs/) - Async runtime
 - [clap](https://clap.rs/) - CLI framework
