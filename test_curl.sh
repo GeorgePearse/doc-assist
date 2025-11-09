@@ -1,0 +1,21 @@
+#!/bin/bash
+
+# Test direct OpenAI API call
+curl https://api.openai.com/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Say hello in one word."
+      }
+    ],
+    "temperature": 0.7,
+    "max_tokens": 10
+  }'

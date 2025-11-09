@@ -43,7 +43,7 @@ struct Cli {
         short,
         long,
         env = "DOCASSIST_MODEL",
-        default_value = "claude-3-5-sonnet-20241022"
+        default_value = "gpt-3.5-turbo"  // Change default to a known working model
     )]
     model: String,
 

@@ -18,7 +18,7 @@ colored = "2.1"     # Colored terminal output
 tokio = { version = "1.40", features = ["full"] }
 
 # LLM integration
-llm-connector = { version = "0.5", features = ["reqwest", "streaming"] }  # Multi-provider LLM client
+litellm-rs = "0.1.3"  # Multi-provider LLM client that works with OpenAI, Anthropic, etc.
 
 # AST parsing
 syn = { version = "2.0", features = ["full", "extra-traits", "parsing"] }

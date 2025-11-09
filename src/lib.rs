@@ -7,6 +7,9 @@ pub mod generator;
 pub mod planner;
 pub mod state;
 
+#[cfg(test)]
+mod test_llm;
+
 use serde::{Deserialize, Serialize};
 
 pub use config::{Config, DepthLevel};

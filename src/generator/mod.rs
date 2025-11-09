@@ -2,9 +2,11 @@ use crate::context::ContextManager;
 use crate::error::{DocAssistError, Result};
 use crate::planner::{Query, QueryPlan, Phase};
 use crate::state::GenerationState;
-use llm_connector::{
-    LlmClient,
-    types::{ChatRequest, Message, Role},
+use litellm_rs::{
+    completion,
+    user_message,
+    system_message,
+    CompletionOptions,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -36,7 +38,7 @@ pub struct GenerationResult {
 
 pub struct Generator {
     model: String,
-    client: Arc<LlmClient>,
+    api_key: String,
     max_concurrent_requests: usize,
     rate_limit_per_minute: usize,
     retry_attempts: usize,
@@ -51,27 +53,23 @@ impl Generator {
         max_concurrent_requests: usize,
         rate_limit_per_minute: usize,
     ) -> Result<Self> {
-        // Create the appropriate client based on the model
-        let client = if model.contains("claude") {
+        // Set the appropriate environment variable based on the model
+        if model.contains("claude") {
             std::env::set_var("ANTHROPIC_API_KEY", api_key.clone());
-            LlmClient::anthropic(&api_key)
-                .map_err(|e| DocAssistError::ConfigError(format!("Failed to create Anthropic client: {}", e)))?
         } else if model.contains("gpt") {
             std::env::set_var("OPENAI_API_KEY", api_key.clone());
-            LlmClient::openai(&api_key)
-                .map_err(|e| DocAssistError::ConfigError(format!("Failed to create OpenAI client: {}", e)))?
         } else {
             return Err(DocAssistError::ConfigError(
                 format!("Unsupported model: {}. Use 'claude' or 'gpt' models", model)
             ));
-        };
+        }
 
         let context_manager = Arc::new(Mutex::new(ContextManager::new(128_000))); // 128k token context
         let state_manager = Arc::new(Mutex::new(GenerationState::new()));
 
         Ok(Self {
             model,
-            client: Arc::new(client),
+            api_key,
             max_concurrent_requests,
             rate_limit_per_minute,
             retry_attempts: 3,
@@ -176,7 +174,7 @@ impl Generator {
             let semaphore = semaphore.clone();
             let rate_limiter = rate_limiter.clone();
             let model = self.model.clone();
-            let client = self.client.clone();
+            let _api_key = self.api_key.clone();  // Used for setting env var in spawned task
             let context_manager = self.context_manager.clone();
             let state_manager = self.state_manager.clone();
             let query = query.clone();
@@ -197,7 +195,7 @@ impl Generator {
                 let mut last_error = None;
 
                 while attempts < retry_attempts {
-                    match execute_single_query(&model, &query, &context, &*client).await {
+                    match execute_single_query(&model, &query, &context).await {
                         Ok(result) => {
                             // Update state and context
                             state_manager.lock().await.mark_query_completed(query.id);
@@ -278,7 +276,6 @@ async fn execute_single_query(
     model: &str,
     query: &Query,
     context: &str,
-    client: &LlmClient,
 ) -> Result<QueryResult> {
     let start_time = std::time::Instant::now();
 
@@ -289,41 +286,50 @@ async fn execute_single_query(
         "Please provide a comprehensive and detailed response suitable for technical documentation."
     );
 
-    // Create chat messages
+    // Create chat messages for LiteLLM
     let messages = vec![
-        Message::text(
-            Role::System,
-            "You are a technical documentation expert. Provide clear, accurate, and comprehensive documentation based on the codebase analysis. Use markdown formatting for better readability."
-        ),
-        Message::text(Role::User, &full_prompt),
+        system_message("You are a technical documentation expert. Provide clear, accurate, and comprehensive documentation based on the codebase analysis. Use markdown formatting for better readability."),
+        user_message(&full_prompt),
     ];
 
-    // Build the request
-    let request = ChatRequest {
-        model: model.to_string(),
-        messages,
-        max_tokens: Some(4000),
+    // Create request options
+    let options = CompletionOptions {
         temperature: Some(0.3), // Lower temperature for more consistent documentation
+        max_tokens: Some(4000),
         ..Default::default()
     };
 
-    // Send request to client
-    let response = client.chat(&request).await
-        .map_err(|e| DocAssistError::GenerationError(format!("LLM request failed: {:?}", e)))?;
+    // Send request using LiteLLM
+    debug!("Sending request for query {} with model {}", query.id, model);
+
+    let response = completion(model, messages, Some(options)).await
+        .map_err(|e| DocAssistError::GenerationError(format!("LLM request failed: {}", e)))?;
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
 
-    // Extract response text using get_content()
-    let response_text = response.get_content()
-        .unwrap_or("")
-        .to_string();
+    // Extract response text - MessageContent is an enum, need to extract the string
+    let response_text = response.choices
+        .first()
+        .and_then(|choice| choice.message.content.as_ref())
+        .and_then(|content| {
+            // Extract text from MessageContent enum
+            match content {
+                litellm_rs::MessageContent::Text(text) => Some(text.clone()),
+                _ => None,
+            }
+        })
+        .unwrap_or_else(|| String::new());
 
-    // Calculate tokens (rough estimate based on response length)
-    let tokens_used = if let Some(usage) = response.usage {
-        usage.total_tokens as usize
-    } else {
-        (full_prompt.len() + response_text.len()) / 4
-    };
+    // Debug log the response
+    debug!("Query {}: Response length = {}", query.id, response_text.len());
+    if response_text.is_empty() {
+        warn!("Query {} returned empty response", query.id);
+    }
+
+    // Calculate tokens from usage or estimate
+    let tokens_used = response.usage
+        .map(|usage| usage.total_tokens as usize)
+        .unwrap_or_else(|| (full_prompt.len() + response_text.len()) / 4);
 
     Ok(QueryResult {
         query_id: query.id,

@@ -1,0 +1,10 @@
+{
+  "doc_assist_version": "0.1.0",
+  "duration_ms": 99107,
+  "errors": [],
+  "generated_at": "2025-11-09T10:13:24.382568326+00:00",
+  "project_name": "project",
+  "total_cost_usd": 0.02573,
+  "total_queries": 20,
+  "total_tokens": 25730
+}
