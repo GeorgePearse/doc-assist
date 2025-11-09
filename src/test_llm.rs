@@ -34,6 +34,12 @@ mod tests {
             .choices
             .first()
             .and_then(|choice| choice.message.content.as_ref())
+            .and_then(|content| {
+                match content {
+                    litellm_rs::MessageContent::Text(text) => Some(text.clone()),
+                    _ => None,
+                }
+            })
             .expect("No content found in response");
 
         println!("\nResponse content: {}", content);
