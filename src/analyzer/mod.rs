@@ -4,6 +4,8 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
 mod language;
@@ -151,23 +153,44 @@ pub async fn analyze_codebase(config: &Config) -> Result<CodebaseAnalysis> {
     // Create file tree
     let file_tree = build_file_tree(&config.path, &files)?;
 
-    // Parse source files
-    let parser = CodeParser::new(primary_language.clone());
+    // Parse source files in parallel
+    let parser = Arc::new(CodeParser::new(primary_language.clone()));
     let mut modules = Vec::new();
     let mut public_apis = Vec::new();
     let mut total_lines = 0;
 
-    for file_path in &files {
-        if let Some(language) = language_from_path(file_path) {
-            match parser.parse_file(file_path, language).await {
-                Ok(parsed) => {
-                    modules.push(parsed.module);
-                    public_apis.extend(parsed.apis);
-                    total_lines += parsed.line_count;
-                }
-                Err(e) => {
-                    debug!("Failed to parse {}: {}", file_path.display(), e);
-                }
+    // Use a semaphore to limit concurrent file operations (prevent file descriptor exhaustion)
+    let semaphore = Arc::new(Semaphore::new(32)); // Limit to 32 concurrent file operations
+    let mut tasks = Vec::new();
+
+    for file_path in files.clone() {
+        if let Some(language) = language_from_path(&file_path) {
+            let parser = parser.clone();
+            let semaphore = semaphore.clone();
+            let file_path_clone = file_path.clone();
+
+            let task = tokio::spawn(async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                parser.parse_file(&file_path_clone, language).await
+            });
+
+            tasks.push((file_path, task));
+        }
+    }
+
+    // Collect all results
+    for (file_path, task) in tasks {
+        match task.await {
+            Ok(Ok(parsed)) => {
+                modules.push(parsed.module);
+                public_apis.extend(parsed.apis);
+                total_lines += parsed.line_count;
+            }
+            Ok(Err(e)) => {
+                debug!("Failed to parse {}: {}", file_path.display(), e);
+            }
+            Err(e) => {
+                debug!("Task failed for {}: {}", file_path.display(), e);
             }
         }
     }

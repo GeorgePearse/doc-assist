@@ -2,6 +2,9 @@ use crate::context::ContextManager;
 use crate::error::{DocAssistError, Result};
 use crate::planner::{Query, QueryPlan, Phase};
 use crate::state::GenerationState;
+
+mod scheduler;
+use scheduler::PhaseScheduler;
 use litellm_rs::{
     completion,
     user_message,
@@ -11,7 +14,7 @@ use litellm_rs::{
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::{sleep, Duration};
 use tracing::{debug, info, warn};
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
@@ -42,7 +45,7 @@ pub struct Generator {
     max_concurrent_requests: usize,
     rate_limit_per_minute: usize,
     retry_attempts: usize,
-    context_manager: Arc<Mutex<ContextManager>>,
+    context_manager: Arc<RwLock<ContextManager>>,
     state_manager: Arc<Mutex<GenerationState>>,
 }
 
@@ -64,7 +67,7 @@ impl Generator {
             ));
         }
 
-        let context_manager = Arc::new(Mutex::new(ContextManager::new(128_000))); // 128k token context
+        let context_manager = Arc::new(RwLock::new(ContextManager::new(128_000))); // 128k token context
         let state_manager = Arc::new(Mutex::new(GenerationState::new()));
 
         Ok(Self {
@@ -111,6 +114,23 @@ impl Generator {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent_requests));
         let rate_limiter = Arc::new(Mutex::new(RateLimiter::new(self.rate_limit_per_minute)));
 
+        // Use smart phase parallelization scheduler
+        let scheduler = PhaseScheduler::new(&plan);
+        info!("Using phase scheduler:\n{}", scheduler.get_execution_strategy());
+
+        // Execute phases with scheduler (currently sequential but logs parallelization opportunities)
+        result = self.execute_phases_with_scheduler(
+            &plan,
+            &scheduler,
+            &semaphore,
+            &rate_limiter,
+            &overall_progress,
+            &multi_progress,
+            result,
+        ).await?;
+
+        // Commented out old sequential loop - replaced by scheduler above
+        /*
         // Track consecutive failures for fail-fast behavior
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: usize = 5;
@@ -181,6 +201,7 @@ impl Generator {
                 phase.queries.len()
             ));
         }
+        */
 
         // Final validation - ensure we have at least some successful queries
         if result.completed_queries == 0 {
@@ -244,7 +265,7 @@ impl Generator {
                 rate_limiter.lock().await.wait_if_needed().await;
 
                 // Build context for this query
-                let context = context_manager.lock().await.get_context_for_query(&query).await;
+                let context = context_manager.read().await.get_context_for_query(&query).await;
 
                 // Execute query with retries
                 let mut attempts = 0;
@@ -255,7 +276,7 @@ impl Generator {
                         Ok(result) => {
                             // Update state and context
                             state_manager.lock().await.mark_query_completed(query.id);
-                            context_manager.lock().await.add_response(query.id, &result.response);
+                            context_manager.write().await.add_response(query.id, &result.response);
 
                             return result;
                         }
@@ -285,9 +306,16 @@ impl Generator {
             tasks.push(task);
         }
 
-        // Wait for all tasks to complete
-        for (i, task) in tasks.into_iter().enumerate() {
-            let result = task.await.map_err(|e| DocAssistError::GenerationError(e.to_string()))?;
+        // Collect all results in parallel (tasks are already running concurrently)
+        let mut joined_results = Vec::new();
+        for task in tasks {
+            let result = task.await
+                .map_err(|e| DocAssistError::GenerationError(format!("Task execution failed: {}", e)))?;
+            joined_results.push(result);
+        }
+
+        // Process all results and update progress
+        for (i, result) in joined_results.into_iter().enumerate() {
             results.push(result);
             overall_progress.inc(1);
             phase_progress.inc(1);
@@ -299,6 +327,107 @@ impl Generator {
         }
 
         Ok(results)
+    }
+
+    // Simplified version that uses existing execute_phase but logs when parallelization could occur
+    async fn execute_phases_with_scheduler(
+        &self,
+        plan: &QueryPlan,
+        scheduler: &PhaseScheduler,
+        semaphore: &Arc<Semaphore>,
+        rate_limiter: &Arc<Mutex<RateLimiter>>,
+        overall_progress: &ProgressBar,
+        multi_progress: &MultiProgress,
+        mut result: GenerationResult,
+    ) -> Result<GenerationResult> {
+        let mut consecutive_failures = 0;
+        const MAX_CONSECUTIVE_FAILURES: usize = 5;
+
+        // For now, execute phases sequentially but log when parallelization would be beneficial
+        for (phase_idx, phase) in plan.phases.iter().enumerate() {
+            // Check if this phase could have started earlier with smart scheduling
+            if phase_idx > 0 && scheduler.can_start_phase(phase_idx).await {
+                info!("Note: Phase {} could run in parallel with earlier phases", phase_idx);
+            }
+
+            info!("Executing phase {}/{}: {}", phase_idx + 1, plan.phases.len(), phase.name);
+
+            let phase_progress = multi_progress.add(ProgressBar::new(phase.queries.len() as u64));
+            phase_progress.set_style(
+                ProgressStyle::default_bar()
+                    .template("  └─ {msg} [{bar:30.green/white}] {pos}/{len}")
+                    .unwrap()
+                    .progress_chars("##-"),
+            );
+            phase_progress.set_message(format!("Phase: {}", phase.name));
+
+            // Use existing execute_phase which already parallelizes queries within the phase
+            let phase_results = self.execute_phase(
+                phase,
+                &semaphore,
+                &rate_limiter,
+                &overall_progress,
+                &phase_progress,
+            ).await?;
+
+            // Mark queries as completed in scheduler
+            for query_result in &phase_results {
+                scheduler.mark_query_completed(query_result.query_id).await;
+            }
+
+            // Update results and check for failures
+            let mut phase_failures = 0;
+            for query_result in &phase_results {
+                result.total_tokens += query_result.tokens_used;
+                result.total_duration_ms += query_result.duration_ms;
+                if query_result.error.is_none() && !query_result.response.is_empty() {
+                    result.completed_queries += 1;
+                    consecutive_failures = 0; // Reset on success
+                } else {
+                    phase_failures += 1;
+                    consecutive_failures += 1;
+
+                    let error_msg = if let Some(ref error) = query_result.error {
+                        format!("Query {}: {}", query_result.query_id, error)
+                    } else {
+                        format!("Query {}: Empty response received", query_result.query_id)
+                    };
+                    result.errors.push(error_msg.clone());
+                    warn!("{}", error_msg);
+                }
+            }
+
+            // Check if we should fail fast
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                overall_progress.abandon_with_message("Documentation generation failed - too many consecutive errors!");
+                return Err(DocAssistError::GenerationError(
+                    format!("Aborting: {} consecutive query failures. Check your LLM configuration.", consecutive_failures)
+                ));
+            }
+
+            // Fail if entire phase failed
+            if phase_failures == phase.queries.len() {
+                overall_progress.abandon_with_message("Documentation generation failed - entire phase failed!");
+                return Err(DocAssistError::GenerationError(
+                    format!("All {} queries in phase '{}' failed. Check your model configuration and API keys.",
+                           phase.queries.len(), phase.name)
+                ));
+            }
+
+            result.phase_results.insert(phase.name.clone(), phase_results);
+            phase_progress.finish_with_message(format!("✓ {} ({}/{} successful)",
+                phase.name,
+                phase.queries.len() - phase_failures,
+                phase.queries.len()
+            ));
+
+            // Log when critical queries that unblock other phases are complete
+            if scheduler.are_critical_queries_completed(phase_idx).await {
+                debug!("Critical queries for phase {} are complete, later phases could now start", phase_idx);
+            }
+        }
+
+        Ok(result)
     }
 
     async fn test_llm_connection(&self) -> Result<()> {
@@ -352,7 +481,7 @@ impl Generator {
         plan.skip_completed(&state.completed_queries);
 
         // Load previous context
-        self.context_manager.lock().await.restore_from_state(&state);
+        self.context_manager.write().await.restore_from_state(&state);
 
         // Continue execution
         self.execute_plan(plan).await

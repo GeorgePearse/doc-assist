@@ -10,14 +10,11 @@ pub mod state;
 #[cfg(test)]
 mod test_llm;
 
-use serde::{Deserialize, Serialize};
 
 pub use config::{Config, DepthLevel};
 pub use error::{DocAssistError, Result};
 
-use crate::analyzer::CodebaseAnalysis;
 use crate::assembler::DocumentationStructure;
-use crate::planner::QueryPlan;
 
 /// Main entry point for documentation generation
 pub async fn generate_documentation(_config: Config) -> Result<DocumentationStructure> {

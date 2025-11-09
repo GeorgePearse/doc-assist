@@ -16,7 +16,6 @@ mod planner;
 mod state;
 
 use crate::config::Config;
-use crate::error::DocAssistError;
 
 #[derive(Parser)]
 #[command(name = "docassist")]

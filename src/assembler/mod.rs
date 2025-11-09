@@ -97,32 +97,38 @@ impl DocumentAssembler {
             ));
         }
 
-        // Generate main README
-        let readme = self.generate_readme(&grouped_results).await?;
-        if !Self::is_content_meaningful(&readme) {
-            warn!("README content appears to be mostly template/placeholder text");
-        }
-        self.write_file("README.md", &readme).await?;
+        // Generate all documents in parallel using tokio::join!
+        let (readme_result, architecture_result, module_result, api_result, guide_result, example_result) = tokio::join!(
+            async {
+                let readme = self.generate_readme(&grouped_results).await?;
+                if !Self::is_content_meaningful(&readme) {
+                    warn!("README content appears to be mostly template/placeholder text");
+                }
+                self.write_file("README.md", &readme).await
+            },
+            async {
+                let architecture = self.generate_architecture_doc(&grouped_results).await?;
+                if !Self::is_content_meaningful(&architecture) {
+                    warn!("Architecture documentation appears to be mostly template text");
+                }
+                self.write_file("ARCHITECTURE.md", &architecture).await
+            },
+            self.generate_module_docs(&grouped_results),
+            async {
+                let api_reference = self.generate_api_reference(&grouped_results).await?;
+                self.write_file("api/README.md", &api_reference).await
+            },
+            self.generate_guides(&grouped_results),
+            self.generate_examples(&grouped_results)
+        );
 
-        // Generate architecture documentation
-        let architecture = self.generate_architecture_doc(&grouped_results).await?;
-        if !Self::is_content_meaningful(&architecture) {
-            warn!("Architecture documentation appears to be mostly template text");
-        }
-        self.write_file("ARCHITECTURE.md", &architecture).await?;
-
-        // Generate module documentation
-        self.generate_module_docs(&grouped_results).await?;
-
-        // Generate API reference
-        let api_reference = self.generate_api_reference(&grouped_results).await?;
-        self.write_file("api/README.md", &api_reference).await?;
-
-        // Generate guides
-        self.generate_guides(&grouped_results).await?;
-
-        // Generate examples
-        self.generate_examples(&grouped_results).await?;
+        // Check results from parallel execution
+        readme_result?;
+        architecture_result?;
+        module_result?;
+        api_result?;
+        guide_result?;
+        example_result?;
 
         // Generate index/table of contents
         let toc = self.generate_table_of_contents().await?;
@@ -138,10 +144,18 @@ impl DocumentAssembler {
     async fn create_directory_structure(&self) -> Result<()> {
         let dirs = ["api", "modules", "guides", "examples", "assets"];
 
-        for dir in &dirs {
+        // Create all directories in parallel
+        let tasks: Vec<_> = dirs.iter().map(|dir| {
             let dir_path = self.output_dir.join(dir);
-            fs::create_dir_all(&dir_path).await
-                .map_err(|e| DocAssistError::IoError(format!("Failed to create directory {:?}: {}", dir_path, e)))?;
+            async move {
+                fs::create_dir_all(&dir_path).await
+                    .map_err(|e| DocAssistError::IoError(format!("Failed to create directory {:?}: {}", dir_path, e)))
+            }
+        }).collect();
+
+        // Wait for all directories to be created
+        for task in tasks {
+            task.await?;
         }
 
         Ok(())

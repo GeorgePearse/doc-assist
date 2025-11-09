@@ -1,6 +1,6 @@
 use crate::analyzer::{CodebaseAnalysis, ApiItem, ApiKind};
 use crate::config::Config;
-use crate::error::{DocAssistError, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::info;
