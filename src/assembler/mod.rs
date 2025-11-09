@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tokio::fs;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentationStructure {
@@ -60,18 +60,55 @@ impl DocumentAssembler {
     pub async fn assemble_documentation(&self, generation_result: &GenerationResult) -> Result<()> {
         info!("Assembling documentation from {} completed queries", generation_result.completed_queries);
 
+        // Validate we have actual content to work with
+        if generation_result.completed_queries == 0 {
+            return Err(DocAssistError::GenerationError(
+                "Cannot assemble documentation: No queries completed successfully".to_string()
+            ));
+        }
+
+        // Validate that we have non-empty responses
+        let non_empty_responses = generation_result.phase_results.values()
+            .flat_map(|results| results.iter())
+            .filter(|r| r.error.is_none() && !r.response.is_empty())
+            .count();
+
+        if non_empty_responses == 0 {
+            return Err(DocAssistError::GenerationError(
+                "Cannot assemble documentation: All responses are empty or contain errors".to_string()
+            ));
+        }
+
+        warn!("Found {} non-empty responses out of {} total queries",
+              non_empty_responses,
+              generation_result.phase_results.values()
+                  .map(|r| r.len())
+                  .sum::<usize>());
+
         // Create output directory structure
         self.create_directory_structure().await?;
 
-        // Group results by category
-        let grouped_results = self.group_results_by_category(generation_result);
+        // Group results by category, filtering out empty responses
+        let grouped_results = self.group_valid_results_by_category(generation_result);
+
+        if grouped_results.is_empty() {
+            return Err(DocAssistError::GenerationError(
+                "Cannot assemble documentation: No valid content to include".to_string()
+            ));
+        }
 
         // Generate main README
         let readme = self.generate_readme(&grouped_results).await?;
+        if !Self::is_content_meaningful(&readme) {
+            warn!("README content appears to be mostly template/placeholder text");
+        }
         self.write_file("README.md", &readme).await?;
 
         // Generate architecture documentation
         let architecture = self.generate_architecture_doc(&grouped_results).await?;
+        if !Self::is_content_meaningful(&architecture) {
+            warn!("Architecture documentation appears to be mostly template text");
+        }
         self.write_file("ARCHITECTURE.md", &architecture).await?;
 
         // Generate module documentation
@@ -110,6 +147,22 @@ impl DocumentAssembler {
         Ok(())
     }
 
+    fn group_valid_results_by_category(&self, generation_result: &GenerationResult) -> HashMap<String, Vec<QueryResult>> {
+        let mut grouped = HashMap::new();
+
+        for (phase_name, phase_results) in &generation_result.phase_results {
+            for result in phase_results {
+                // Only include results with actual content
+                if result.error.is_none() && !result.response.is_empty() {
+                    let category = self.determine_category(phase_name, &result.prompt);
+                    grouped.entry(category).or_insert_with(Vec::new).push(result.clone());
+                }
+            }
+        }
+
+        grouped
+    }
+
     fn group_results_by_category(&self, generation_result: &GenerationResult) -> HashMap<String, Vec<QueryResult>> {
         let mut grouped = HashMap::new();
 
@@ -121,6 +174,24 @@ impl DocumentAssembler {
         }
 
         grouped
+    }
+
+    fn is_content_meaningful(content: &str) -> bool {
+        // Check if content has actual documentation beyond template text
+        let meaningful_lines = content.lines()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !trimmed.is_empty() &&
+                !trimmed.starts_with('#') && // Ignore headers
+                !trimmed.starts_with("TODO") &&
+                !trimmed.starts_with("- Feature") &&
+                !trimmed.contains("Add installation instructions") &&
+                !trimmed.contains("Add usage examples")
+            })
+            .count();
+
+        // Content should have at least 10 lines of meaningful text
+        meaningful_lines >= 10
     }
 
     fn determine_category(&self, phase_name: &str, prompt: &str) -> String {

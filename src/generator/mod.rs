@@ -85,6 +85,9 @@ impl Generator {
             plan.phases.len()
         );
 
+        // Test LLM connection before starting the full generation
+        self.test_llm_connection().await?;
+
         let multi_progress = MultiProgress::new();
         let overall_progress = multi_progress.add(ProgressBar::new(plan.total_queries as u64));
         overall_progress.set_style(
@@ -108,6 +111,10 @@ impl Generator {
         let semaphore = Arc::new(Semaphore::new(self.max_concurrent_requests));
         let rate_limiter = Arc::new(Mutex::new(RateLimiter::new(self.rate_limit_per_minute)));
 
+        // Track consecutive failures for fail-fast behavior
+        let mut consecutive_failures = 0;
+        const MAX_CONSECUTIVE_FAILURES: usize = 5;
+
         for (phase_idx, phase) in plan.phases.iter().enumerate() {
             info!("Executing phase {}/{}: {}", phase_idx + 1, plan.phases.len(), phase.name);
 
@@ -128,29 +135,78 @@ impl Generator {
                 &phase_progress,
             ).await?;
 
-            // Update results
+            // Update results and check for failures
+            let mut phase_failures = 0;
             for query_result in &phase_results {
                 result.total_tokens += query_result.tokens_used;
                 result.total_duration_ms += query_result.duration_ms;
-                if query_result.error.is_none() {
+                if query_result.error.is_none() && !query_result.response.is_empty() {
                     result.completed_queries += 1;
-                } else if let Some(ref error) = query_result.error {
-                    result.errors.push(format!("Query {}: {}", query_result.query_id, error));
+                    consecutive_failures = 0; // Reset on success
+                } else {
+                    phase_failures += 1;
+                    consecutive_failures += 1;
+
+                    let error_msg = if let Some(ref error) = query_result.error {
+                        format!("Query {}: {}", query_result.query_id, error)
+                    } else {
+                        format!("Query {}: Empty response received", query_result.query_id)
+                    };
+                    result.errors.push(error_msg.clone());
+                    warn!("{}", error_msg);
                 }
             }
 
+            // Check if we should fail fast
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                overall_progress.abandon_with_message("Documentation generation failed - too many consecutive errors!");
+                return Err(DocAssistError::GenerationError(
+                    format!("Aborting: {} consecutive query failures. Check your LLM configuration.", consecutive_failures)
+                ));
+            }
+
+            // Fail if entire phase failed
+            if phase_failures == phase.queries.len() {
+                overall_progress.abandon_with_message("Documentation generation failed - entire phase failed!");
+                return Err(DocAssistError::GenerationError(
+                    format!("All {} queries in phase '{}' failed. Check your model configuration and API keys.",
+                           phase.queries.len(), phase.name)
+                ));
+            }
+
             result.phase_results.insert(phase.name.clone(), phase_results);
-            phase_progress.finish_with_message(format!("✓ {}", phase.name));
+            phase_progress.finish_with_message(format!("✓ {} ({}/{} successful)",
+                phase.name,
+                phase.queries.len() - phase_failures,
+                phase.queries.len()
+            ));
+        }
+
+        // Final validation - ensure we have at least some successful queries
+        if result.completed_queries == 0 {
+            overall_progress.abandon_with_message("Documentation generation failed - no successful queries!");
+            return Err(DocAssistError::GenerationError(
+                "No queries completed successfully. Check your LLM provider configuration and API keys.".to_string()
+            ));
+        }
+
+        // Warn if more than 50% of queries failed
+        let failure_rate = (result.errors.len() as f64) / (plan.total_queries as f64);
+        if failure_rate > 0.5 {
+            warn!("High failure rate: {:.1}% of queries failed", failure_rate * 100.0);
+            overall_progress.finish_with_message(format!("⚠ Generation completed with warnings ({}/{} successful)",
+                result.completed_queries, plan.total_queries));
+        } else {
+            overall_progress.finish_with_message("Documentation generation complete!");
         }
 
         // Calculate cost
         result.total_cost_usd = self.calculate_cost(result.total_tokens);
 
-        overall_progress.finish_with_message("Documentation generation complete!");
-
         info!(
-            "Generation complete: {} queries, {} tokens, ${:.2}, {:.1}s",
+            "Generation complete: {}/{} queries successful, {} tokens, ${:.2}, {:.1}s",
             result.completed_queries,
+            plan.total_queries,
             result.total_tokens,
             result.total_cost_usd,
             result.total_duration_ms as f64 / 1000.0
@@ -243,6 +299,37 @@ impl Generator {
         }
 
         Ok(results)
+    }
+
+    async fn test_llm_connection(&self) -> Result<()> {
+        info!("Testing LLM connection with model: {}", self.model);
+
+        let test_query = Query {
+            id: 0,
+            prompt: "Respond with 'OK' to confirm the connection works.".to_string(),
+            description: "Connection test".to_string(),
+            context_spec: crate::planner::ContextSpec::None,
+            priority: crate::planner::QueryPriority::Critical,
+            estimated_tokens: 50,
+            target: crate::planner::QueryTarget::Overview,
+        };
+
+        match execute_single_query(&self.model, &test_query, "").await {
+            Ok(result) => {
+                if result.response.is_empty() {
+                    return Err(DocAssistError::GenerationError(
+                        format!("LLM connection test failed: Empty response from model '{}'", self.model)
+                    ));
+                }
+                info!("✓ LLM connection test successful");
+                Ok(())
+            }
+            Err(e) => {
+                return Err(DocAssistError::GenerationError(
+                    format!("LLM connection test failed: {}. Please check:\n  1. Your API key is set correctly (ANTHROPIC_API_KEY or OPENAI_API_KEY)\n  2. The model '{}' is valid and accessible\n  3. Your API key has sufficient credits", e, self.model)
+                ));
+            }
+        }
     }
 
     fn calculate_cost(&self, total_tokens: usize) -> f64 {

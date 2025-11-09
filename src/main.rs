@@ -179,13 +179,25 @@ async fn main() -> Result<()> {
     }
     println!();
 
-    // Check for API key
-    if std::env::var("ANTHROPIC_API_KEY").is_err()
-        && std::env::var("OPENAI_API_KEY").is_err() {
-        error!("No API key found. Please set ANTHROPIC_API_KEY or OPENAI_API_KEY");
-        println!("\n{}", "Example:".bold());
-        println!("  export ANTHROPIC_API_KEY=your-api-key");
-        println!("  docassist .");
+    // Check for API key and validate model configuration
+    let api_key_validation = validate_api_configuration(&config.model);
+    if let Err(e) = api_key_validation {
+        error!("{}", e);
+        println!("\n{}", "Configuration Help:".bold());
+        println!("  1. Set your API key:");
+        if config.model.contains("claude") {
+            println!("     export ANTHROPIC_API_KEY=your-api-key");
+        } else if config.model.contains("gpt") {
+            println!("     export OPENAI_API_KEY=your-api-key");
+        } else {
+            println!("     export ANTHROPIC_API_KEY=your-api-key  # for Claude models");
+            println!("     export OPENAI_API_KEY=your-api-key     # for GPT models");
+        }
+        println!("\n  2. Verify your model name is correct:");
+        println!("     - Claude models: claude-3-opus, claude-3-sonnet, etc.");
+        println!("     - OpenAI models: gpt-4, gpt-3.5-turbo, etc.");
+        println!("\n  3. Run docassist with a valid model:");
+        println!("     docassist --model gpt-3.5-turbo .");
         std::process::exit(1);
     }
 
@@ -198,7 +210,15 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Err(e) => {
-            error!("Documentation generation failed: {}", e);
+            // Print error to both stderr and stdout for visibility
+            println!();
+            eprintln!("{} Documentation generation failed!", "✗".red().bold());
+            eprintln!("{}", e.to_string().red());
+
+            // Also print to stdout for better test capture
+            println!("{} Documentation generation failed!", "✗".red().bold());
+            println!("{}", e);
+
             std::process::exit(1);
         }
     }
@@ -306,6 +326,62 @@ async fn run_documentation_generation(config: Config, dry_run: bool) -> Result<(
     println!("  {} {}", "Total queries:".cyan(), plan.total_queries);
     println!("  {} ${:.2}", "Estimated cost:".cyan(), plan.estimated_cost.total_cost_usd);
     println!("  {} {}", "Files generated:".cyan(), documentation.file_count);
+
+    Ok(())
+}
+
+fn validate_api_configuration(model: &str) -> Result<()> {
+    let supported_models = [
+        // OpenAI models
+        ("gpt-4", "OPENAI_API_KEY"),
+        ("gpt-4-turbo", "OPENAI_API_KEY"),
+        ("gpt-3.5-turbo", "OPENAI_API_KEY"),
+        ("gpt-4o", "OPENAI_API_KEY"),
+        ("gpt-4o-mini", "OPENAI_API_KEY"),
+        // Anthropic models
+        ("claude-3-opus", "ANTHROPIC_API_KEY"),
+        ("claude-3-sonnet", "ANTHROPIC_API_KEY"),
+        ("claude-3-haiku", "ANTHROPIC_API_KEY"),
+        ("claude-2", "ANTHROPIC_API_KEY"),
+        ("claude-instant", "ANTHROPIC_API_KEY"),
+    ];
+
+    // Determine which API key is needed
+    let required_key = if model.contains("claude") {
+        "ANTHROPIC_API_KEY"
+    } else if model.contains("gpt") {
+        "OPENAI_API_KEY"
+    } else {
+        // Check if it's a known model
+        let known_model = supported_models.iter()
+            .find(|(m, _)| model.contains(m));
+
+        if let Some((_, key)) = known_model {
+            key
+        } else {
+            return Err(anyhow::anyhow!(
+                "Unknown model '{}'. Supported models include: gpt-4, gpt-3.5-turbo, claude-3-opus, claude-3-sonnet",
+                model
+            ));
+        }
+    };
+
+    // Check if the required API key is set
+    if std::env::var(required_key).is_err() {
+        return Err(anyhow::anyhow!(
+            "API key '{}' not found for model '{}'. Please set it as an environment variable.",
+            required_key, model
+        ));
+    }
+
+    // Validate the API key format (basic check)
+    let api_key = std::env::var(required_key).unwrap();
+    if api_key.is_empty() || api_key == "your-api-key" {
+        return Err(anyhow::anyhow!(
+            "Invalid API key for '{}'. The key appears to be empty or a placeholder.",
+            required_key
+        ));
+    }
 
     Ok(())
 }
